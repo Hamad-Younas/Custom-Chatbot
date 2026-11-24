@@ -1,0 +1,6 @@
+backend/node_modules
+backend/uploads
+backend/*.log
+backend/.env
+backend/.env.example
+frontend
