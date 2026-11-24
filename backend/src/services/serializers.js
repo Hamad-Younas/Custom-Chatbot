@@ -46,7 +46,10 @@ export function serializeVisitor(v, chatbotId) {
 /** Image a visitor attached in the widget (kept in messages.metadata.attachment). */
 export function attachmentOf(m) {
   const a = j(m.metadata, null)?.attachment;
-  return a && a.url ? { type: a.type || "image", url: a.url, name: a.name || null, mime: a.mime || null, size: a.size || null } : null;
+  if (!a) return null;
+  const base = { type: a.type || "image", name: a.name || null, mime: a.mime || null, size: a.size || null };
+  // expired = the file was deleted automatically (older than the last N messages): show a placeholder
+  return a.url && !a.expired ? { ...base, url: a.url, expired: false } : { ...base, url: null, expired: true };
 }
 
 export function serializeMessage(m, extra = {}) {

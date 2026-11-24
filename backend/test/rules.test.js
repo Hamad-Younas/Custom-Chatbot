@@ -191,3 +191,19 @@ test("widget remembers the account ID per tab only (sessionStorage, not localSto
   assert.match(src, /sess\.set\("acct", id\)/);
   assert.doesNotMatch(src, /store\.set\("acct/);
 });
+
+
+test("a chat image deleted by the cleanup shows as a placeholder, the message itself stays", async () => {
+  const { attachmentOf } = await import("../src/services/serializers.js");
+  const live = attachmentOf({ metadata: JSON.stringify({ attachment: { type: "image", url: "https://x/uploads/chat/a.png", file_id: 5 } }) });
+  assert.equal(live.url, "https://x/uploads/chat/a.png");
+  assert.equal(live.expired, false);
+  const gone = attachmentOf({ metadata: JSON.stringify({ attachment: { type: "image", url: null, expired: true, file_id: 5 } }) });
+  assert.equal(gone.url, null);
+  assert.equal(gone.expired, true);
+});
+
+test("chat images are kept for the last 8 messages by default", async () => {
+  const { env } = await import("../src/config/env.js");
+  assert.equal(env.CHAT_IMAGE_KEEP_LAST_MESSAGES, 8);
+});

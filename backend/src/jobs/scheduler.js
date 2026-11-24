@@ -2,6 +2,7 @@ import cron from "node-cron";
 import { env } from "../config/env.js";
 import { query } from "../db/pool.js";
 import { rollupDay } from "../services/analytics.js";
+import { sweepChatImages } from "../services/imageCleanup.js";
 import { retryDeletionRequests } from "../services/chatbots.js";
 import { markInactiveInstallations } from "../services/install.js";
 import { notify, runDeliveryQueue } from "../services/notifier.js";
@@ -67,6 +68,10 @@ export function startScheduler() {
   setInterval(guard("waiting", waitingAlerts), 60_000);
   cron.schedule("*/15 * * * *", guard("installations", async () => markInactiveInstallations(await settingInt("installation_inactive_after_hours", 72))));
   cron.schedule("*/10 * * * *", guard("deletions", retryDeletionRequests));
+  // old chat images: delete files that left the last-N-messages window (messages are kept)
+  const images = guard("chat-images", sweepChatImages);
+  cron.schedule("*/10 * * * *", images);
+  setTimeout(images, 30_000).unref?.();
   cron.schedule("15 3 * * *", guard("retention", retention), { timezone: "UTC" });
   cron.schedule("5 * * * *", guard("rollup", async () => {
     const today = new Date().toISOString().slice(0, 10);

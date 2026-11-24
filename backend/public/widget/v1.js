@@ -35,7 +35,7 @@
     cfg: null, behavior: {}, availability: {}, open: store.get("open") === "1", visitorId: store.get("vid"), visitorToken: store.get("vtok"),
     conv: store.get("conv"), mode: "ai", messages: [], typing: false, agentTyping: null, emoji: false, contact: false, contactDone: false,
     consent: store.get("consent"), sending: false, es: null, pollTimer: null, lastId: 0, error: null, newBelow: false, ready: false,
-    awaitingAcct: false,
+    awaitingAcct: false, goneImgs: {},
   };
   S.awaitingAcct = sess.get("acctWait") === "1";
 
@@ -87,6 +87,7 @@
     link: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     down: '<path d="m6 9 6 6 6-6"/>',
     retry: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    imgoff: '<line x1="2" x2="22" y1="2" y2="22"/><path d="M10.41 10.41a2 2 0 1 1-2.83-2.83"/><line x1="13.5" x2="6" y1="13.5" y2="21"/><line x1="18" x2="21" y1="12" y2="15"/><path d="M3.59 3.59A1.99 1.99 0 0 0 3 5v14a2 2 0 0 0 2 2h14c.55 0 1.052-.22 1.41-.59"/><path d="M21 15V5a2 2 0 0 0-2-2H9"/>',
     clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
   };
   function icon(n, size) { return '<svg xmlns="http://www.w3.org/2000/svg" width="' + (size || 18) + '" height="' + (size || 18) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || ICONS.chat) + "</svg>"; }
@@ -140,7 +141,7 @@
       ".msgs{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}.msgs::-webkit-scrollbar{width:6px}.msgs::-webkit-scrollbar-thumb{background:" + border + ";border-radius:9px}",
       ".it.enter{animation:pl-in .25s ease}.ctas{display:flex;flex-direction:column;gap:8px}.row{display:flex}.row.v{justify-content:flex-end}.mwrap{max-width:82%}.who{font-size:.72em;font-weight:500;color:" + muted + ";margin-bottom:4px}",
       ".bub{padding:10px 14px;line-height:1.5;white-space:normal;word-wrap:break-word;overflow-wrap:anywhere}.bub a{color:inherit;text-decoration:underline}",
-      ".att{display:block;width:220px;max-width:100%;border-radius:" + r + "px;overflow:hidden;border:1px solid " + border + ";background:" + bot + ";margin-bottom:4px}.row.v .att{margin-left:auto}.att img{display:block;width:100%;height:auto;max-height:260px;object-fit:cover}.row.v .att + .bub{margin-top:0}",
+      ".att{display:block;width:220px;max-width:100%;border-radius:" + r + "px;overflow:hidden;border:1px solid " + border + ";background:" + bot + ";margin-bottom:4px}.row.v .att{margin-left:auto}.att img{display:block;width:100%;height:auto;max-height:260px;object-fit:cover}.row.v .att + .bub{margin-top:0}.att.gone{display:flex;align-items:center;gap:8px;padding:10px 12px;font-size:.8em;color:" + muted + ";border-style:dashed}",
       ".row.v .bub{background:" + (isG ? "linear-gradient(135deg," + c.bubbleColor + "," + c.secondaryColor + ")" : c.bubbleColor) + ";color:#fff;border-radius:" + r + "px " + r + "px 4px " + r + "px}",
       ".row.b .bub{background:" + bot + ";color:" + fg + ";border:" + (isM || isP ? "1px solid " + border : "0") + ";border-radius:" + r + "px " + r + "px " + r + "px 4px}",
       ".row.h .bub{background:" + (dark ? "#2d2a22" : "#1f1d1a") + ";color:#fff;border-radius:" + r + "px " + r + "px " + r + "px 4px}",
@@ -204,8 +205,11 @@
     if (!v) html += '<div class="who">' + esc(h ? (m.sender_name || "Support") : c.assistantName) + (m.answer_source === "faq" ? " · FAQ" : "") + "</div>";
     var att = m.attachment && m.attachment.type === "image" ? m.attachment : null;
     var src = m._localUrl || (att && att.url);
-    if (src) html += '<a class="att" href="' + esc((att && att.url) || src) + '" target="_blank" rel="noopener noreferrer"><img src="' + esc(src) + '" alt="' + esc((att && att.name) || "Image") + '"></a>';
-    if (!src || (m.content && m.content !== IMAGE_PLACEHOLDER)) html += '<div class="bub">' + linkify(m.content) + "</div>";
+    // image deleted automatically (older than the last messages) or not found → placeholder
+    var gone = att && !m._localUrl && (att.expired || !src || S.goneImgs[src]);
+    if (gone) html += '<div class="att gone">' + icon("imgoff", 16) + "<span>Image no longer available</span></div>";
+    else if (src) html += '<a class="att" href="' + esc((att && att.url) || src) + '" target="_blank" rel="noopener noreferrer"><img src="' + esc(src) + '" alt="' + esc((att && att.name) || "Image") + '"></a>';
+    if (!(src || gone) || (m.content && m.content !== IMAGE_PLACEHOLDER)) html += '<div class="bub">' + linkify(m.content) + "</div>";
     html += '<div class="meta"><span>' + (m.sent_at || !m.welcome ? hm(m.sent_at) : "") + "</span>";
     if (v && m._status === "sending") html += "<span>Sending…</span>";
     if (v && m._status === "failed") html += '<button class="err" data-a="retry" data-id="' + esc(m.client_message_id) + '">' + icon("retry", 12) + " Not sent · Retry</button>";
@@ -377,6 +381,15 @@
   }
 
   // ------------------------------------------------------------------ events
+  // An image that can't be loaded any more (deleted from the server) turns into the placeholder.
+  wrap.addEventListener("error", function (e) {
+    var t = e.target;
+    if (!t || t.tagName !== "IMG" || !t.parentNode || !t.parentNode.classList || !t.parentNode.classList.contains("att")) return;
+    var src = t.getAttribute("src");
+    if (!src || /^blob:/.test(src) || S.goneImgs[src]) return;
+    S.goneImgs[src] = 1;
+    render();
+  }, true);
   wrap.addEventListener("click", function (e) {
     var t = e.target.closest("[data-a]");
     if (!t) return;

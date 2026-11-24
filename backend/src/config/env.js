@@ -80,6 +80,8 @@ export const env = {
   MAX_UPLOAD_MB: int("MAX_UPLOAD_MB", 2),
   // Images visitors attach in the chat widget (the widget also shrinks big photos before sending)
   CHAT_IMAGE_MAX_MB: int("CHAT_IMAGE_MAX_MB", 5),
+  // A chat image is deleted from disk once it is no longer among the last N messages of its chat
+  CHAT_IMAGE_KEEP_LAST_MESSAGES: int("CHAT_IMAGE_KEEP_LAST_MESSAGES", 8),
 
   CONVERSATION_WAITING_ALERT_MINUTES: int("CONVERSATION_WAITING_ALERT_MINUTES", 5),
   RUN_BACKGROUND_JOBS: bool("RUN_BACKGROUND_JOBS", true),

@@ -7,6 +7,7 @@ import { AppError } from "../utils/errors.js";
 import { normalize, truncate, wantsHuman } from "../utils/text.js";
 import { ai, aiIdOf } from "./aiService.js";
 import { matchFaq } from "./faqMatcher.js";
+import { scheduleImageCleanup } from "./imageCleanup.js";
 import { notify } from "./notifier.js";
 import { publicMessage, serializeConversation, serializeMessage, visitorName } from "./serializers.js";
 
@@ -81,6 +82,8 @@ async function bumpCounters(conv, msg) {
      WHERE id = ?`,
     [truncate(msg.content, 255), msg.sender_type, conv.id],
   );
+  // a new message may push an older image out of the last-N window → delete that image file
+  scheduleImageCleanup(conv.id);
 }
 
 /** Insert a non-visitor message. With `requireMode`, the insert only happens if the conversation is still in that mode/version. */
