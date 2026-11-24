@@ -22,12 +22,22 @@
     get: function (k) { try { return localStorage.getItem(KEY + k); } catch (e) { return null; } },
     set: function (k, v) { try { v === null ? localStorage.removeItem(KEY + k) : localStorage.setItem(KEY + k, v); } catch (e) {} },
   };
+  // Per-tab memory (sessionStorage): survives reloads, forgotten when the tab is closed.
+  // Holds the visitor's account ID and whether we already asked for it in this tab.
+  var sess = {
+    get: function (k) { try { return sessionStorage.getItem(KEY + k); } catch (e) { return S && S["_s" + k] || null; } },
+    set: function (k, v) {
+      try { v === null ? sessionStorage.removeItem(KEY + k) : sessionStorage.setItem(KEY + k, v); } catch (e) { if (S) S["_s" + k] = v; }
+    },
+  };
 
   var S = {
     cfg: null, behavior: {}, availability: {}, open: store.get("open") === "1", visitorId: store.get("vid"), visitorToken: store.get("vtok"),
     conv: store.get("conv"), mode: "ai", messages: [], typing: false, agentTyping: null, emoji: false, contact: false, contactDone: false,
     consent: store.get("consent"), sending: false, es: null, pollTimer: null, lastId: 0, error: null, newBelow: false, ready: false,
+    awaitingAcct: false,
   };
+  S.awaitingAcct = sess.get("acctWait") === "1";
 
   // ------------------------------------------------------------------ http
   function req(method, path, body) {
@@ -36,6 +46,16 @@
     return fetch(BASE + path, { method: method, headers: h, body: body ? JSON.stringify(body) : undefined, mode: "cors", credentials: "omit" }).then(function (r) {
       return r.json().catch(function () { return {}; }).then(function (d) {
         if (!r.ok) { var e = new Error((d.error && d.error.message) || "Request failed"); e.status = r.status; e.code = d.error && d.error.code; throw e; }
+        return d;
+      });
+    });
+  }
+  function upload(path, fd) {
+    var h = {};
+    if (S.visitorId) { h["x-visitor-id"] = S.visitorId; h["x-visitor-token"] = S.visitorToken || ""; }
+    return fetch(BASE + path, { method: "POST", headers: h, body: fd, mode: "cors", credentials: "omit" }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (d) {
+        if (!r.ok) { var e = new Error((d.error && d.error.message) || "Upload failed"); e.status = r.status; e.code = d.error && d.error.code; throw e; }
         return d;
       });
     });
@@ -67,11 +87,27 @@
     link: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     down: '<path d="m6 9 6 6 6-6"/>',
     retry: '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    clip: '<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
   };
   function icon(n, size) { return '<svg xmlns="http://www.w3.org/2000/svg" width="' + (size || 18) + '" height="' + (size || 18) + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[n] || ICONS.chat) + "</svg>"; }
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
-  function linkify(s) { return esc(s).replace(/(https?:\/\/[^\s<]+[^\s<.,;:!?)\]])/g, '<a href="$1" target="_blank" rel="noopener noreferrer">$1</a>').replace(/\n/g, "<br>"); }
+  // Links in messages (incl. the welcome message) become clickable and open in a new tab:
+  // https://…, www.… and plain domains such as example.com/help.
+  var URL_RE = /(?:https?:\/\/|www\.)[^\s<>"']*[^\s<>"'.,;:!?)\]]|\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:com|net|org|io|co|id|app|dev|me|info|biz|xyz|ai|kh|us|uk|in|ph|my|sg|vn|th|shop|store|site|online|link)(?![a-z0-9-])(?:\/[^\s<>"']*[^\s<>"'.,;:!?)\]])?/gi;
+  function linkify(s) {
+    s = String(s == null ? "" : s);
+    var out = "", last = 0, m;
+    URL_RE.lastIndex = 0;
+    while ((m = URL_RE.exec(s))) {
+      if (m.index > 0 && /[@\w.\/-]/.test(s.charAt(m.index - 1))) continue; // part of an email or a longer word
+      var u = m[0], href = /^https?:\/\//i.test(u) ? u : "https://" + u;
+      out += esc(s.slice(last, m.index)) + '<a href="' + esc(href) + '" target="_blank" rel="noopener noreferrer">' + esc(u) + "</a>";
+      last = m.index + u.length;
+    }
+    return (out + esc(s.slice(last))).replace(/\n/g, "<br>");
+  }
   function hm(iso) { var d = iso ? new Date(iso) : new Date(); return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+  var IMAGE_PLACEHOLDER = "📷 Image"; // text stored with an image that has no caption
   var EMOJIS = ["😀", "😂", "😍", "🥰", "😎", "🤔", "👍", "🙏", "👏", "🎉", "❤️", "🔥", "✨", "☕", "📦", "😅", "😢", "🙌", "👋", "✅"];
 
   function css(c) {
@@ -104,6 +140,7 @@
       ".msgs{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px;scroll-behavior:smooth}.msgs::-webkit-scrollbar{width:6px}.msgs::-webkit-scrollbar-thumb{background:" + border + ";border-radius:9px}",
       ".it.enter{animation:pl-in .25s ease}.ctas{display:flex;flex-direction:column;gap:8px}.row{display:flex}.row.v{justify-content:flex-end}.mwrap{max-width:82%}.who{font-size:.72em;font-weight:500;color:" + muted + ";margin-bottom:4px}",
       ".bub{padding:10px 14px;line-height:1.5;white-space:normal;word-wrap:break-word;overflow-wrap:anywhere}.bub a{color:inherit;text-decoration:underline}",
+      ".att{display:block;width:220px;max-width:100%;border-radius:" + r + "px;overflow:hidden;border:1px solid " + border + ";background:" + bot + ";margin-bottom:4px}.row.v .att{margin-left:auto}.att img{display:block;width:100%;height:auto;max-height:260px;object-fit:cover}.row.v .att + .bub{margin-top:0}",
       ".row.v .bub{background:" + (isG ? "linear-gradient(135deg," + c.bubbleColor + "," + c.secondaryColor + ")" : c.bubbleColor) + ";color:#fff;border-radius:" + r + "px " + r + "px 4px " + r + "px}",
       ".row.b .bub{background:" + bot + ";color:" + fg + ";border:" + (isM || isP ? "1px solid " + border : "0") + ";border-radius:" + r + "px " + r + "px " + r + "px 4px}",
       ".row.h .bub{background:" + (dark ? "#2d2a22" : "#1f1d1a") + ";color:#fff;border-radius:" + r + "px " + r + "px " + r + "px 4px}",
@@ -165,7 +202,10 @@
     var v = m.sender_type === "visitor", h = m.sender_type === "human";
     var html = '<div class="row ' + (v ? "v" : h ? "h" : "b") + '"><div class="mwrap">';
     if (!v) html += '<div class="who">' + esc(h ? (m.sender_name || "Support") : c.assistantName) + (m.answer_source === "faq" ? " · FAQ" : "") + "</div>";
-    html += '<div class="bub">' + linkify(m.content) + "</div>";
+    var att = m.attachment && m.attachment.type === "image" ? m.attachment : null;
+    var src = m._localUrl || (att && att.url);
+    if (src) html += '<a class="att" href="' + esc((att && att.url) || src) + '" target="_blank" rel="noopener noreferrer"><img src="' + esc(src) + '" alt="' + esc((att && att.name) || "Image") + '"></a>';
+    if (!src || (m.content && m.content !== IMAGE_PLACEHOLDER)) html += '<div class="bub">' + linkify(m.content) + "</div>";
     html += '<div class="meta"><span>' + (m.sent_at || !m.welcome ? hm(m.sent_at) : "") + "</span>";
     if (v && m._status === "sending") html += "<span>Sending…</span>";
     if (v && m._status === "failed") html += '<button class="err" data-a="retry" data-id="' + esc(m.client_message_id) + '">' + icon("retry", 12) + " Not sent · Retry</button>";
@@ -244,6 +284,7 @@
       var hadFocus = old && root.activeElement === old;
       var f = "";
       if (c.enable_emoji_picker !== false) f += '<button type="button" class="ibtn" data-a="emoji-toggle" aria-label="Add emoji"' + (blocked ? " disabled" : "") + ">" + icon("smile", 18) + "</button>";
+      f += '<button type="button" class="ibtn" data-a="attach" aria-label="Attach an image"' + (blocked ? " disabled" : "") + ">" + icon("clip", 17) + "</button>";
       f += '<input class="inp" name="m" maxlength="' + (S.behavior.max_message_length || 500) + '" placeholder="Type a message…" aria-label="Message" autocomplete="off"' + (blocked ? " disabled" : "") + ">";
       f += '<button class="send" type="submit" aria-label="Send message" disabled>' + icon("send", 16) + "</button>";
       dom.form.innerHTML = f;
@@ -286,7 +327,10 @@
     dom.emo = document.createElement("div"); dom.emo.className = "emo"; dom.emo.style.display = "none";
     dom.form = document.createElement("form"); dom.form.className = "form"; dom.form.setAttribute("data-f", "send");
     dom.foot = document.createElement("div");
-    dom.comp.appendChild(dom.emo); dom.comp.appendChild(dom.form); dom.comp.appendChild(dom.foot);
+    dom.file = document.createElement("input");
+    dom.file.type = "file"; dom.file.accept = "image/png,image/jpeg,image/webp,image/gif"; dom.file.style.display = "none";
+    dom.file.addEventListener("change", function () { var f = dom.file.files && dom.file.files[0]; dom.file.value = ""; if (f) sendImage(f); });
+    dom.comp.appendChild(dom.emo); dom.comp.appendChild(dom.form); dom.comp.appendChild(dom.file); dom.comp.appendChild(dom.foot);
     p.appendChild(dom.hdr); p.appendChild(dom.ann); p.appendChild(dom.msgs); p.appendChild(dom.comp);
     dom.msgs.addEventListener("scroll", function () {
       if (S.newBelow && nearBottom(dom.msgs, 40)) { S.newBelow = false; if (dom.newBtn) { dom.newBtn.remove(); dom.newBtn = null; } }
@@ -316,7 +360,7 @@
       renderComposer();
     } else if (dom.panel) {
       dom.panel.remove();
-      dom.panel = dom.hdr = dom.ann = dom.msgs = dom.comp = dom.emo = dom.form = dom.foot = dom.newBtn = null;
+      dom.panel = dom.hdr = dom.ann = dom.msgs = dom.comp = dom.emo = dom.form = dom.foot = dom.newBtn = dom.file = null;
       dom.items = {}; dom.formKey = null;
     }
     if (!dom.launcher) {
@@ -353,6 +397,13 @@
     else if (a === "consent-no") { consent("denied"); setOpen(false); }
     else if (a === "contact-skip") { S.contact = false; render(); }
     else if (a === "talk") talkToPerson();
+    else if (a === "attach") { if (dom.file && !blockedNow()) dom.file.click(); }
+  });
+  // pasting a screenshot into the message box attaches it
+  wrap.addEventListener("paste", function (e) {
+    if (!e.target.classList || !e.target.classList.contains("inp")) return;
+    var items = (e.clipboardData && e.clipboardData.files) || [];
+    for (var i = 0; i < items.length; i++) if (/^image\//.test(items[i].type)) { e.preventDefault(); sendImage(items[i]); return; }
   });
   var typingTimer = null;
   wrap.addEventListener("input", function (e) {
@@ -419,15 +470,39 @@
     S.lastId = Math.max(S.lastId, Number(m.id) || 0);
     if (!S.open && m.sender_type !== "visitor") unread++;
   }
+    // ---- account ID memory (this tab only)
+  var NOT_AN_ID = /^(hi|hello|hey|ok|okay|yes|no|thanks|thank|please|help|halo|hai|ya|iya|tidak|bukan|terima|kasih|tolong)$/i;
+  /** Pull an account ID out of a reply such as "12345", "ACC-889" or "my id is 12345". */
+  function extractAccountId(text) {
+    var t = String(text || "").trim();
+    if (!t || t.length > 200) return null;
+    var tokens = t.split(/[\s,;:]+/).map(function (x) { return x.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ""); }).filter(Boolean);
+    for (var i = 0; i < tokens.length; i++) if (/\d/.test(tokens[i]) && tokens[i].length >= 3 && tokens[i].length <= 64) return tokens[i];
+    if (tokens.length === 1 && tokens[0].length >= 3 && tokens[0].length <= 64 && !NOT_AN_ID.test(tokens[0])) return tokens[0];
+    return null;
+  }
+  function accountId() { return sess.get("acct"); }
+  function accountAsked() { return sess.get("acctAsked") === "1" || Boolean(accountId()); }
+  /** The bot just asked for (or asked to confirm) the account ID: remember that and read the next replies for it. */
+  function markAccountAsked() { sess.set("acctAsked", "1"); S.awaitingAcct = true; sess.set("acctWait", "1"); }
+  function captureAccountId(text) {
+    if (!S.awaitingAcct) return;
+    var id = extractAccountId(text);
+    if (!id) return;
+    sess.set("acct", id); S.awaitingAcct = false; sess.set("acctWait", null);
+  }
+
   function send(text) {
     text = String(text || "").trim();
     if (!text) return;
+    captureAccountId(text);
     var m = { id: uid(), client_message_id: uid(), sender_type: "visitor", content: text, sent_at: new Date().toISOString(), _status: "sending" };
     S.messages.push(m);
     render();
     ensureSession().then(function () { deliver(m); });
   }
   function deliver(m) {
+    if (m._file) return deliverImage(m);
     m._status = "sending"; S.error = null;
     if (S.mode !== "human") S.typing = true;
     render();
@@ -456,15 +531,79 @@
     ensureSession()
       .then(function () {
         if (!S.visitorId) throw new Error("no session");
-        return req("POST", "/talk-to-person", { conversation_uid: S.conv, page_url: location.href, lang: lang() });
+        return req("POST", "/talk-to-person", { conversation_uid: S.conv, page_url: location.href, lang: lang(), account_id: accountId() });
       })
       .then(function (d) {
         S.talking = false; S.typing = false;
         S.conv = d.conversation.conversation_uid; store.set("conv", S.conv); S.mode = d.conversation.handling_mode;
         if (d.reply) addMessage(d.reply);
+        if (d.asked_account_id) markAccountAsked();
         render();
       })
       .catch(function () { S.talking = false; S.error = "Couldn't reach the team. Please try again."; render(); });
+  }
+
+  // ---- image attachments: sent to the team only, the AI never sees them
+  var IMAGE_TYPES = /^image\/(png|jpeg|webp|gif)$/;
+  var MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  /** Shrink big photos (phones) to max 1600px JPEG before upload; small images and GIFs are sent as they are. */
+  function shrinkImage(file) {
+    return new Promise(function (resolve) {
+      if (file.type === "image/gif" || file.size <= 1.5 * 1024 * 1024 || !window.URL || !document.createElement("canvas").toBlob) return resolve(file);
+      var url = URL.createObjectURL(file), img = new Image();
+      img.onload = function () {
+        var k = Math.min(1, 1600 / Math.max(img.naturalWidth, img.naturalHeight));
+        var c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+        var g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        c.toBlob(function (b) {
+          if (!b || b.size >= file.size) return resolve(file);
+          try { resolve(new File([b], String(file.name || "image").replace(/\.\w+$/, "") + ".jpg", { type: "image/jpeg" })); } catch (e) { b.name = "image.jpg"; resolve(b); }
+        }, "image/jpeg", 0.85);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve(file); };
+      img.src = url;
+    });
+  }
+  function sendImage(file) {
+    if (blockedNow()) return;
+    if (!IMAGE_TYPES.test(file.type || "")) { S.error = "You can attach PNG, JPG, WEBP or GIF images."; render(); return; }
+    shrinkImage(file).then(function (f) {
+      if (f.size > MAX_IMAGE_BYTES) { S.error = "That image is too large (max 5 MB)."; render(); return; }
+      var m = { id: uid(), client_message_id: uid(), sender_type: "visitor", content: IMAGE_PLACEHOLDER, sent_at: new Date().toISOString(), _status: "sending", _file: f, _localUrl: window.URL ? URL.createObjectURL(f) : null, attachment: { type: "image", name: f.name || "image" } };
+      S.messages.push(m);
+      render();
+      ensureSession().then(function () { deliverImage(m); });
+    });
+  }
+  function deliverImage(m) {
+    m._status = "sending"; S.error = null;
+    render();
+    var fd = new FormData();
+    if (S.conv) fd.append("conversation_uid", S.conv);
+    fd.append("client_message_id", m.client_message_id);
+    fd.append("page_url", location.href.slice(0, 2048));
+    fd.append("lang", lang());
+    if (accountId()) fd.append("account_id", accountId());
+    fd.append("account_asked", accountAsked() ? "1" : "0");
+    fd.append("file", m._file, m._file.name || "image.jpg");
+    upload("/attachments", fd)
+      .then(function (d) {
+        S.conv = d.conversation.conversation_uid; store.set("conv", S.conv); S.mode = d.conversation.handling_mode;
+        var local = m._localUrl;
+        m._file = null;
+        addMessage(Object.assign({}, d.message, { _localUrl: local }));
+        if (d.reply) addMessage(d.reply);
+        if (d.asked_account_id) markAccountAsked();
+        render();
+      })
+      .catch(function (e) {
+        m._status = "failed";
+        if (e.code === "invalid_visitor") { sessionPromise = null; S.visitorId = null; store.set("vid", null); }
+        S.error = e.status === 413 || e.status === 429 || e.code === "invalid_file_type" ? e.message : null;
+        render();
+      });
   }
 
   // ------------------------------------------------------------------ realtime (SSE, falls back to polling)

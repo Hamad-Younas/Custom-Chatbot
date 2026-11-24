@@ -1,10 +1,11 @@
 // Public API used by the embeddable widget (public/widget/v1.js). No cookies; origin must be an allowed domain.
 import { Router } from "express";
+import multer from "multer";
 import { env } from "../config/env.js";
 import { one, query } from "../db/pool.js";
 import { bus, toChatbot } from "../realtime/bus.js";
 import { agentsOnline, isVisitorOnline, visitorConnected, visitorDisconnected } from "../realtime/presence.js";
-import { broadcastConversation, getSettings, handleVisitorMessage, insertReply, requestPersonFromWidget } from "../services/chatPipeline.js";
+import { broadcastConversation, getSettings, handleVisitorImage, handleVisitorMessage, insertReply, requestPersonFromWidget } from "../services/chatPipeline.js";
 import { matchOrigin, recordInstallation } from "../services/install.js";
 import { notify } from "../services/notifier.js";
 import { publicMessage, serializeVisitor, visitorName } from "../services/serializers.js";
@@ -14,6 +15,7 @@ import { ah, AppError, forbidden, notFound, unauthorized } from "../utils/errors
 import { hostOf } from "../utils/text.js";
 import { geoFromHeaders, parseUserAgent } from "../utils/ua.js";
 import { parse, z } from "../utils/validate.js";
+import { saveImage } from "./account.routes.js";
 
 const r = Router({ mergeParams: true });
 const WIDGET_VERSION = "1.0.0";
@@ -208,6 +210,7 @@ r.post("/talk-to-person", ah(async (req, res) => {
       conversation_uid: z.string().max(64).optional().nullable(),
       page_url: z.string().max(2048).optional().nullable(),
       lang: z.string().max(35).optional().nullable(),
+      account_id: z.string().max(64).optional().nullable(),
     }),
     req.body || {},
   );
@@ -216,8 +219,57 @@ r.post("/talk-to-person", ah(async (req, res) => {
     conversation: { conversation_uid: out.conversation.conversation_uid, status: out.conversation.status, handling_mode: out.conversation.handling_mode },
     reply: out.reply ? publicMessage(out.reply, out.conversation.conversation_uid) : null,
     already: Boolean(out.already),
+    asked_account_id: Boolean(out.askedAccountId),
   });
 }));
+
+/** Images a visitor attaches in the widget. They go to the team only; the AI never sees them. */
+const CHAT_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const chatImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: env.CHAT_IMAGE_MAX_MB * 1024 * 1024, files: 1, fields: 10, fieldSize: 4096 },
+  fileFilter: (_req, file, cb) => (CHAT_IMAGE_TYPES.has(file.mimetype) ? cb(null, true) : cb(new AppError(400, "invalid_file_type", "You can attach PNG, JPG, WEBP or GIF images."))),
+});
+
+r.post(
+  "/attachments",
+  ah(async (req, _res, next) => {
+    req.visitor = await requireVisitor(req);
+    const s = await getSettings(req.bot.id);
+    if (s.consent_required && req.visitor.consent_status !== "granted") throw new AppError(403, "consent_required", "Please accept the chat terms first.");
+    next();
+  }),
+  chatImageUpload.single("file"),
+  ah(async (req, res) => {
+    if (!req.file) throw new AppError(400, "validation_error", "Choose an image to send.");
+    const body = parse(
+      z.object({
+        conversation_uid: z.string().max(64).optional().nullable(),
+        client_message_id: z.string().min(4).max(64),
+        caption: z.string().max(2000).optional().nullable(),
+        page_url: z.string().max(2048).optional().nullable(),
+        lang: z.string().max(35).optional().nullable(),
+        account_id: z.string().max(64).optional().nullable(),
+        account_asked: z.enum(["0", "1"]).optional().nullable(),
+      }),
+      req.body || {},
+    );
+    const out = await handleVisitorImage({
+      bot: req.bot,
+      visitor: req.visitor,
+      input: { ...body, account_asked: body.account_asked === "1" },
+      file: req.file,
+      saveFile: () => saveImage(req.file, { userId: req.bot.user_id, chatbotId: req.bot.id, purpose: "other", folder: "chat" }),
+    });
+    res.json({
+      conversation: { conversation_uid: out.conversation.conversation_uid, status: out.conversation.status, handling_mode: out.conversation.handling_mode },
+      message: publicMessage(out.message, out.conversation.conversation_uid),
+      reply: out.reply ? publicMessage(out.reply, out.conversation.conversation_uid) : null,
+      duplicate: Boolean(out.duplicate),
+      asked_account_id: Boolean(out.askedAccountId),
+    });
+  }),
+);
 
 r.get("/conversations/:conversationUid/messages", ah(async (req, res) => {
   const v = await requireVisitor(req);

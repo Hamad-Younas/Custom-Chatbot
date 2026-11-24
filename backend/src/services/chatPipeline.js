@@ -162,7 +162,8 @@ async function requestHuman(bot, settings, conv, visitor, visitorMsg, reason) {
 async function historyFor(conv, beforeId) {
   const rows = await query(
     `SELECT sender_type, content FROM messages WHERE conversation_id = ? AND id < ? AND content_type = 'text' AND sender_type IN ('visitor','ai','human') AND is_deleted = 0
-     ORDER BY id DESC LIMIT 8`,
+    AND (metadata IS NULL OR JSON_EXTRACT(metadata, '$.attachment') IS NULL)
+    ORDER BY id DESC LIMIT 8`,
     [conv.id, beforeId],
   );
   return rows.reverse().map((r) => ({ role: r.sender_type === "visitor" ? "user" : "assistant", content: r.content.slice(0, 2000) }));
@@ -242,30 +243,58 @@ async function findOrCreateConversation(bot, visitor, input) {
 }
 
 export const TALK_TO_PERSON_MESSAGE = "Please share your account ID — a person will talk to you shortly.";
+export const IMAGE_FORWARDED_MESSAGE = "Your image has been forwarded to customer support. They will get back to you soon.";
+export const IMAGE_PLACEHOLDER = "📷 Image";
+
+/** Account ID the widget remembered for this browser tab (it forgets it when the tab is closed). */
+export function cleanAccountId(v) {
+  const s = String(v ?? "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, 64);
+  return s || null;
+}
+
+/** "Talk to a person" reply: ask for the account ID, or confirm the one already shared in this tab. */
+export function talkToPersonMessage(accountId) {
+  const id = cleanAccountId(accountId);
+  if (!id) return TALK_TO_PERSON_MESSAGE;
+  return `This is your account ID: ${id}. A person will talk to you soon. If this isn't your account ID, please share your new account ID.`;
+}
+
+/** Reply to an image: it goes to the team (never to the AI); ask for the account ID once per tab. */
+export function imageForwardedMessage({ askAccountId }) {
+  return askAccountId ? `${IMAGE_FORWARDED_MESSAGE} Please share your account ID.` : IMAGE_FORWARDED_MESSAGE;
+}
+
+/** Hand an AI conversation to the team: AI paused, conversation waits for an agent. */
+async function handOverToTeam(conv, reason, source) {
+  const r = await query(
+    `UPDATE conversations SET handling_mode = 'human', mode_version = mode_version + 1, had_human_handover = 1,
+       human_requested = 1, human_requested_at = COALESCE(human_requested_at, UTC_TIMESTAMP()), human_request_reason = ?,
+       waiting_alert_sent_at = NULL, status = 'waiting_human'
+     WHERE id = ? AND handling_mode = 'ai'`,
+    [reason.slice(0, 255), conv.id],
+  );
+  if (r.affectedRows) {
+    await event(conv, "human_requested", "visitor", null, null, null, { source });
+    await event(conv, "takeover", "system", null, "ai", "human", { policy: source });
+  }
+  return one("SELECT * FROM conversations WHERE id = ?", [conv.id]);
+}
 
 /**
  * Visitor clicked "Talk to a person" in the widget: reply with a fixed message and hand the
  * conversation to the team. From then on every visitor message goes to the dashboard only — the
  * AI never answers until an agent clicks "Return to AI". The team is notified.
+ * If the visitor already shared an account ID in this browser tab, the reply confirms that ID
+ * (and invites a new one) instead of asking again.
  */
 export async function requestPersonFromWidget({ bot, visitor, input }) {
   let { conv, isNew } = await findOrCreateConversation(bot, visitor, input);
   if (conv.handling_mode === "human") {
     return { conversation: await one("SELECT * FROM conversations WHERE id = ?", [conv.id]), reply: null, already: true };
   }
-  const r = await query(
-    `UPDATE conversations SET handling_mode = 'human', mode_version = mode_version + 1, had_human_handover = 1,
-       human_requested = 1, human_requested_at = COALESCE(human_requested_at, UTC_TIMESTAMP()), human_request_reason = ?,
-       waiting_alert_sent_at = NULL, status = 'waiting_human'
-     WHERE id = ? AND handling_mode = 'ai'`,
-    ['Visitor clicked "Talk to a person"', conv.id],
-  );
-  if (r.affectedRows) {
-    await event(conv, "human_requested", "visitor", null, null, null, { source: "widget_button" });
-    await event(conv, "takeover", "system", null, "ai", "human", { policy: "talk_to_person_button" });
-  }
-  conv = await one("SELECT * FROM conversations WHERE id = ?", [conv.id]);
-  const reply = await insertReply(conv, { senderType: "ai", content: TALK_TO_PERSON_MESSAGE, answerSource: "canned", aiStatus: "handover" });
+  const accountId = cleanAccountId(input.account_id);
+  conv = await handOverToTeam(conv, 'Visitor clicked "Talk to a person"', "talk_to_person_button");
+  const reply = await insertReply(conv, { senderType: "ai", content: talkToPersonMessage(accountId), answerSource: "canned", aiStatus: "handover" });
   if (reply) emitMessage(conv, reply);
   await broadcastConversation(conv.id);
   if (isNew) {
@@ -275,12 +304,77 @@ export async function requestPersonFromWidget({ bot, visitor, input }) {
     chatbotId: bot.id,
     event: "human_requested",
     title: `${visitorName(visitor)} wants to talk to a person`,
-    body: "They clicked “Talk to a person” in the chat widget. The AI is paused for this chat — reply from the dashboard.",
+    body: `${accountId ? `Account ID: ${accountId}. ` : ""}They clicked “Talk to a person” in the chat widget. The AI is paused for this chat — reply from the dashboard.`,
     conversationId: conv.id,
     data: { conversation_uid: conv.conversation_uid },
     dedupe: `hr:${conv.id}:${Math.floor(Date.now() / 600_000)}`,
   });
-  return { conversation: await one("SELECT * FROM conversations WHERE id = ?", [conv.id]), reply };
+  return { conversation: await one("SELECT * FROM conversations WHERE id = ?", [conv.id]), reply, askedAccountId: true };
+}
+
+/**
+ * Visitor attached an image in the widget. The AI never sees images: the image goes to the team's
+ * inbox. If the AI was handling the chat, the visitor gets a fixed "forwarded to customer support"
+ * reply (asking for the account ID unless it was already asked in this browser tab) and the chat
+ * is handed to the team. If a person is already handling it, nothing is auto-replied.
+ * `saveFile()` stores the upload and returns { id, url }; it runs only for non-duplicate uploads.
+ */
+export async function handleVisitorImage({ bot, visitor, input, file, saveFile }) {
+  const settings = await getSettings(bot.id);
+  if (!rateCheck(`${bot.id}:${visitor.id}`, settings.max_messages_per_minute)) throw new AppError(429, "rate_limited", "You're sending messages too quickly. Please wait a moment.");
+  let { conv, isNew } = await findOrCreateConversation(bot, visitor, input);
+  const cmid = input.client_message_id ? String(input.client_message_id).slice(0, 64) : null;
+  if (cmid) {
+    const existing = await one("SELECT * FROM messages WHERE conversation_id = ? AND client_message_id = ?", [conv.id, cmid]);
+    if (existing) {
+      const reply = await one("SELECT * FROM messages WHERE reply_to_message_id = ? ORDER BY id LIMIT 1", [existing.id]);
+      return { duplicate: true, conversation: conv, message: existing, reply };
+    }
+  }
+  const saved = await saveFile();
+  const caption = String(input.caption || "").trim().slice(0, settings.max_message_length || 500);
+  const content = caption || IMAGE_PLACEHOLDER;
+  const metadata = {
+    attachment: { type: "image", url: saved.url, file_id: saved.id, name: (file?.originalname || "image").slice(0, 120), mime: file?.mimetype || null, size: file?.size || null },
+    ...(input.page_url ? { page_url: String(input.page_url).slice(0, 500) } : {}),
+  };
+  const ins = await query(
+    `INSERT INTO messages (conversation_id, chatbot_id, client_message_id, sender_type, content, language, delivery_status, metadata)
+     VALUES (?,?,?, 'visitor', ?, ?, 'delivered', ?)`,
+    [conv.id, bot.id, cmid, content, (input.lang || "").slice(0, 16) || null, toJson(metadata)],
+  );
+  const visitorMsg = await one("SELECT * FROM messages WHERE id = ?", [ins.insertId]);
+  await bumpCounters(conv, visitorMsg);
+  await query("UPDATE visitors SET last_seen_at = UTC_TIMESTAMP(), last_page_url = COALESCE(?, last_page_url) WHERE id = ?", [(input.page_url || "").slice(0, 2048) || null, visitor.id]);
+  emitMessage(conv, visitorMsg);
+  await broadcastConversation(conv.id);
+  if (isNew) {
+    await notify({ chatbotId: bot.id, event: "new_conversation", title: `New conversation from ${visitorName(visitor)}`, body: "Sent an image", conversationId: conv.id, data: { conversation_uid: conv.conversation_uid } });
+  }
+  const accountId = cleanAccountId(input.account_id);
+  const body = [accountId ? `Account ID: ${accountId}` : null, caption || null, saved.url].filter(Boolean).join(" · ").slice(0, 300);
+
+  conv = await one("SELECT * FROM conversations WHERE id = ?", [conv.id]);
+  if (conv.handling_mode === "human") {
+    await notify({ chatbotId: bot.id, event: "new_message_attention", title: `${visitorName(visitor)} sent an image`, body, conversationId: conv.id, data: { conversation_uid: conv.conversation_uid } });
+    return { conversation: conv, message: visitorMsg, reply: null };
+  }
+
+  const askAccountId = !input.account_asked;
+  conv = await handOverToTeam(conv, "Visitor sent an image", "image_attachment");
+  const reply = await insertReply(conv, { senderType: "ai", content: imageForwardedMessage({ askAccountId }), answerSource: "canned", aiStatus: "handover", replyTo: visitorMsg.id });
+  if (reply) emitMessage(conv, reply);
+  await broadcastConversation(conv.id);
+  await notify({
+    chatbotId: bot.id,
+    event: "human_requested",
+    title: `${visitorName(visitor)} sent an image`,
+    body,
+    conversationId: conv.id,
+    data: { conversation_uid: conv.conversation_uid },
+    dedupe: `img:${conv.id}:${Math.floor(Date.now() / 600_000)}`,
+  });
+  return { conversation: await one("SELECT * FROM conversations WHERE id = ?", [conv.id]), message: visitorMsg, reply, askedAccountId: askAccountId };
 }
 
 /**

@@ -28,7 +28,7 @@ export const imageUpload = multer({
 });
 
 /** Store an uploaded image under UPLOAD_DIR with an unguessable name. */
-export async function saveImage(file, { userId, chatbotId = null, purpose }) {
+export async function saveImage(file, { userId, chatbotId = null, purpose, folder = null }) {
   // check magic bytes, not just the declared mime type
   const b = file.buffer;
   const isPng = b[0] === 0x89 && b[1] === 0x50;
@@ -36,8 +36,9 @@ export async function saveImage(file, { userId, chatbotId = null, purpose }) {
   const isGif = b.slice(0, 3).toString() === "GIF";
   const isWebp = b.slice(0, 4).toString() === "RIFF" && b.slice(8, 12).toString() === "WEBP";
   if (!(isPng || isJpg || isGif || isWebp)) throw new AppError(400, "invalid_file_type", "That file isn't a valid image.");
-  const key = `${purpose}/${randomId(32)}.${IMAGE_TYPES[file.mimetype]}`;
-  fs.mkdirSync(path.join(uploadRoot, purpose), { recursive: true });
+  const dir = folder || purpose;
+  const key = `${dir}/${randomId(32)}.${IMAGE_TYPES[file.mimetype]}`;
+  fs.mkdirSync(path.join(uploadRoot, dir), { recursive: true });
   fs.writeFileSync(path.join(uploadRoot, key), b);
   const res = await query(
     "INSERT INTO uploaded_files (user_id, chatbot_id, purpose, storage_driver, storage_key, original_name, mime_type, size_bytes, sha256) VALUES (?,?,?, 'local', ?,?,?,?,?)",

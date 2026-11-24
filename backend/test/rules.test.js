@@ -102,7 +102,7 @@ test("every AI call that takes a chatbot id uses aiIdOf, never public_id directl
 const { buildFaqCatalog, decideGroqMatch } = await import("../src/services/faqMatcher.js");
 const { groqJson } = await import("../src/services/groq.js");
 const { env: appEnv } = await import("../src/config/env.js");
-const { TALK_TO_PERSON_MESSAGE } = await import("../src/services/chatPipeline.js");
+const { TALK_TO_PERSON_MESSAGE, talkToPersonMessage, imageForwardedMessage } = await import("../src/services/chatPipeline.js");
 
 test("a reworded question uses the FAQ when Groq is confident it asks the same thing", () => {
   const ids = new Set(["7"]);
@@ -167,4 +167,27 @@ test("the widget offers Talk to a person instead of Powered by parley", () => {
   const widget = fs.readFileSync(path.resolve(here, "../public/widget/v1.js"), "utf8");
   assert.match(widget, /\/talk-to-person/);
   assert.equal(/Powered by/.test(widget), false);
+});
+
+test("talk to a person: asks for the account ID when none was shared in this tab", () => {
+  assert.equal(talkToPersonMessage(null), "Please share your account ID — a person will talk to you shortly.");
+});
+
+test("talk to a person: confirms the account ID already shared in this tab", () => {
+  assert.equal(
+    talkToPersonMessage("ACC-1234"),
+    "This is your account ID: ACC-1234. A person will talk to you soon. If this isn't your account ID, please share your new account ID.",
+  );
+});
+
+test("image attachment: forwarded to customer support and asks for the account ID once", () => {
+  assert.equal(imageForwardedMessage({ askAccountId: true }), "Your image has been forwarded to customer support. They will get back to you soon. Please share your account ID.");
+  assert.equal(imageForwardedMessage({ askAccountId: false }), "Your image has been forwarded to customer support. They will get back to you soon.");
+});
+
+test("widget remembers the account ID per tab only (sessionStorage, not localStorage)", () => {
+  const src = fs.readFileSync(path.resolve(here, "../public/widget/v1.js"), "utf8");
+  assert.match(src, /sessionStorage\.setItem\(KEY \+ k, v\)/);
+  assert.match(src, /sess\.set\("acct", id\)/);
+  assert.doesNotMatch(src, /store\.set\("acct/);
 });

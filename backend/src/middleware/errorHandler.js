@@ -17,7 +17,8 @@ export function errorHandler(err, req, res, _next) {
     return res.status(413).json({ error: { code: "payload_too_large", message: "Request body is too large." } });
   }
   if (err?.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({ error: { code: "file_too_large", message: `File is too large (max ${env.MAX_UPLOAD_MB} MB).` } });
+    const maxMb = /\/attachments$/.test(String(req.originalUrl || "").split("?")[0]) ? env.CHAT_IMAGE_MAX_MB : env.MAX_UPLOAD_MB;
+    return res.status(413).json({ error: { code: "file_too_large", message: `File is too large (max ${maxMb} MB).` } });
   }
   if (err?.code === "ER_DUP_ENTRY") {
     return res.status(409).json({ error: { code: "duplicate", message: "That item already exists." } });

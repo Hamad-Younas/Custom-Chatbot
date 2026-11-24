@@ -43,6 +43,12 @@ export function serializeVisitor(v, chatbotId) {
   };
 }
 
+/** Image a visitor attached in the widget (kept in messages.metadata.attachment). */
+export function attachmentOf(m) {
+  const a = j(m.metadata, null)?.attachment;
+  return a && a.url ? { type: a.type || "image", url: a.url, name: a.name || null, mime: a.mime || null, size: a.size || null } : null;
+}
+
 export function serializeMessage(m, extra = {}) {
   return {
     id: m.id,
@@ -59,6 +65,7 @@ export function serializeMessage(m, extra = {}) {
     delivery_status: m.delivery_status,
     sent_at: iso(m.sent_at),
     reply_to_message_id: m.reply_to_message_id,
+    attachment: attachmentOf(m),
   };
 }
 
@@ -74,6 +81,7 @@ export function publicMessage(m, conversationUid) {
     content_type: m.content_type,
     answer_source: m.answer_source === "faq" ? "faq" : null,
     sent_at: iso(m.sent_at),
+    attachment: attachmentOf(m),
   };
 }
 

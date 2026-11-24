@@ -78,6 +78,8 @@ export const env = {
 
   UPLOAD_DIR: str("UPLOAD_DIR", "uploads"),
   MAX_UPLOAD_MB: int("MAX_UPLOAD_MB", 2),
+  // Images visitors attach in the chat widget (the widget also shrinks big photos before sending)
+  CHAT_IMAGE_MAX_MB: int("CHAT_IMAGE_MAX_MB", 5),
 
   CONVERSATION_WAITING_ALERT_MINUTES: int("CONVERSATION_WAITING_ALERT_MINUTES", 5),
   RUN_BACKGROUND_JOBS: bool("RUN_BACKGROUND_JOBS", true),
