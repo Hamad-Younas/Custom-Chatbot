@@ -19,7 +19,7 @@
 --     identifiers, NOT credentials.
 -- =====================================================================
 
-SET @db_name = 'chatbot_saas';           -- <<< CHANGE THE DATABASE NAME HERE (only here)
+SET @db_name = 'ibukotanusantara_chatbot_saas';           -- <<< CHANGE THE DATABASE NAME HERE (only here)
 
 -- Optional: also create a least-privilege application user (0 = skip, 1 = create)
 SET @create_app_user = 0;
